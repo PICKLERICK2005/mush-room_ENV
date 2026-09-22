@@ -13,6 +13,12 @@
 
 constexpr int SDA_PIN = 2;
 constexpr int SCL_PIN = 1;
+
+// NanoC6 onboard indicators (M5Stack pin map)
+constexpr int BLUE_LED_PIN = 7;
+constexpr int RGB_DATA_PIN = 20;
+constexpr int RGB_POWER_PIN = 19;
+constexpr uint32_t WEB_ACTIVE_MS = 6000UL;
 constexpr uint32_t SENSOR_INTERVAL_MS = 5000UL;
 constexpr uint32_t LOG_INTERVAL_MS = 300000UL;
 constexpr uint32_t WIFI_RETRY_MS = 30000UL;
@@ -65,10 +71,57 @@ Aggregate agg;
 uint32_t sessionId = 0;
 uint32_t recordSeq = 0;
 uint32_t lastSensorMs = 0, lastLogMs = 0, lastWifiRetryMs = 0, lastValidSampleMs = 0;
+uint32_t lastWebActivityMs = 0;
 bool firstRecordPending = true, filesystemOk = false, ntpConfigured = false, mdnsStarted = false;
 
 uint32_t currentChunkId = 0, oldestChunkId = 0;
 size_t currentChunkSize = 0, logBytes = 0, logFileCount = 0, logBudgetBytes = 0;
+
+void initStatusLeds() {
+  pinMode(BLUE_LED_PIN, OUTPUT);
+  digitalWrite(BLUE_LED_PIN, LOW);
+
+  // The WS2812 has a separate power-enable pin on NanoC6.
+  pinMode(RGB_POWER_PIN, OUTPUT);
+  digitalWrite(RGB_POWER_PIN, HIGH);
+  delay(2);
+  rgbLedWrite(RGB_DATA_PIN, 0, 0, 0);
+}
+
+void noteWebActivity() {
+  lastWebActivityMs = millis();
+}
+
+void updateStatusLeds() {
+  const uint32_t nowMs = millis();
+  const bool sensorHealthy = latest.valid && (nowMs - lastValidSampleMs < SENSOR_INTERVAL_MS * 3UL);
+  const bool healthy = filesystemOk && sensorHealthy;
+
+  // Blue LED = logger health. Solid blue when healthy; fast blink if degraded.
+  if (healthy) {
+    digitalWrite(BLUE_LED_PIN, HIGH);
+  } else {
+    digitalWrite(BLUE_LED_PIN, ((nowMs / 250UL) & 1U) ? HIGH : LOW);
+  }
+
+  // RGB uses deliberately low values so the tiny unit is not obnoxiously bright.
+  // Priority: fault > active dashboard > direct AP client > house Wi-Fi > idle.
+  const bool webActive = lastWebActivityMs != 0 && (nowMs - lastWebActivityMs < WEB_ACTIVE_MS);
+  const uint8_t apClients = WiFi.softAPgetStationNum();
+  const bool staConnected = WiFi.status() == WL_CONNECTED;
+
+  if (!healthy) {
+    rgbLedWrite(RGB_DATA_PIN, 28, 0, 0);          // red: sensor/filesystem fault
+  } else if (webActive) {
+    rgbLedWrite(RGB_DATA_PIN, 0, 28, 0);          // green: dashboard/API actively in use
+  } else if (apClients > 0) {
+    rgbLedWrite(RGB_DATA_PIN, 0, 14, 28);         // cyan: device associated to MUSHROOM-ENV AP
+  } else if (staConnected) {
+    rgbLedWrite(RGB_DATA_PIN, 24, 8, 0);          // amber: joined configured house Wi-Fi
+  } else {
+    rgbLedWrite(RGB_DATA_PIN, 0, 0, 0);           // off: standalone and nobody connected
+  }
+}
 
 float dewPointC(float tempC, float rh) {
   if (rh <= 0.0f || rh > 100.0f || !isfinite(tempC)) return NAN;
@@ -345,7 +398,8 @@ button.danger{background:#a83434}code{word-break:break-all}</style></head>
 <section class="grid" style="margin-top:12px">
 <div class="card small"><strong>Logger</strong><br>Session: <span id="session">--</span><br>Uptime: <span id="uptime">--</span><br>Clock: <span id="clock">--</span><br>Sample age: <span id="age">--</span></div>
 <div class="card small"><strong>Storage</strong><br>Logs: <span id="logbytes">--</span><br>Files: <span id="files">--</span><br>Filesystem: <span id="fs">--</span></div>
-<div class="card small"><strong>Network</strong><br>STA: <span id="sta">--</span><br>RSSI: <span id="rssi">--</span><br>Direct AP: <code>MUSHROOM-ENV</code><br>AP IP: <code>192.168.4.1</code></div>
+<div class="card small"><strong>Network</strong><br>STA: <span id="sta">--</span><br>RSSI: <span id="rssi">--</span><br>AP clients: <span id="apclients">--</span><br>Direct AP: <code>MUSHROOM-ENV</code><br>AP IP: <code>192.168.4.1</code></div>
+<div class="card small"><strong>Status LEDs</strong><br>Blue: logger healthy<br>Green RGB: dashboard active<br>Cyan RGB: AP client connected<br>Amber RGB: house Wi-Fi connected<br>Red RGB: fault</div>
 </section>
 <div class="actions"><a class="button" href="/download.csv">Download all CSV</a>
 <button id="sync">Sync clock from this device</button><button class="danger" id="clear">Clear logs</button></div>
@@ -361,7 +415,7 @@ $("dew").textContent=j.valid?j.dewpoint_c.toFixed(2)+" °C":"--";$("pressure").t
 $("session").textContent=j.session;$("uptime").textContent=uptime(j.uptime_s);$("clock").textContent=j.time_valid?new Date(j.epoch*1000).toLocaleString():"unsynchronised";
 $("age").textContent=j.valid?(j.sample_age_ms/1000).toFixed(1)+" s":"--";$("logbytes").textContent=`${bytes(j.log_bytes)} / ${bytes(j.log_budget_bytes)}`;
 $("files").textContent=j.log_files;$("fs").textContent=`${bytes(j.fs_used_bytes)} / ${bytes(j.fs_total_bytes)}`;
-$("sta").textContent=j.sta_connected?j.sta_ip:"offline";$("rssi").textContent=j.sta_connected?`${j.rssi_dbm} dBm`:"--"}catch(e){console.log(e)}}
+$("sta").textContent=j.sta_connected?j.sta_ip:"offline";$("rssi").textContent=j.sta_connected?`${j.rssi_dbm} dBm`:"--";$("apclients").textContent=j.ap_clients}catch(e){console.log(e)}}
 $("sync").onclick=async()=>{await syncClock();await refresh()};
 $("clear").onclick=async()=>{if(!confirm("Delete all stored environmental logs?"))return;await fetch("/clear",{method:"POST"});await refresh()};
 syncClock().then(refresh);setInterval(refresh,2000);
@@ -394,6 +448,7 @@ void sendLiveJson() {
   json += ",\"sta_connected\":" + String(sta ? "true" : "false");
   json += ",\"sta_ip\":\"" + String(sta ? WiFi.localIP().toString() : "") + "\"";
   json += ",\"rssi_dbm\":" + String(sta ? WiFi.RSSI() : 0);
+  json += ",\"ap_clients\":" + String(WiFi.softAPgetStationNum());
   json += "}";
 
   server.send(200, "application/json", json);
@@ -434,10 +489,11 @@ void downloadCsv() {
 }
 
 void setupWebServer() {
-  server.on("/", HTTP_GET, [](){ server.send_P(200, "text/html; charset=utf-8", INDEX_HTML); });
-  server.on("/api/live", HTTP_GET, [](){ sendLiveJson(); });
+  server.on("/", HTTP_GET, [](){ noteWebActivity(); server.send_P(200, "text/html; charset=utf-8", INDEX_HTML); });
+  server.on("/api/live", HTTP_GET, [](){ noteWebActivity(); sendLiveJson(); });
 
   server.on("/api/time", HTTP_POST, [](){
+    noteWebActivity();
     if (!server.hasArg("epoch")) { server.send(400, "text/plain", "Missing epoch."); return; }
     time_t epoch = (time_t)strtoull(server.arg("epoch").c_str(), nullptr, 10);
     if (epoch < VALID_EPOCH_MIN) { server.send(400, "text/plain", "Invalid epoch."); return; }
@@ -445,8 +501,8 @@ void setupWebServer() {
     server.send(204);
   });
 
-  server.on("/download.csv", HTTP_GET, [](){ downloadCsv(); });
-  server.on("/clear", HTTP_POST, [](){ clearLogs(); server.send(200, "text/plain", "Logs cleared."); });
+  server.on("/download.csv", HTTP_GET, [](){ noteWebActivity(); downloadCsv(); });
+  server.on("/clear", HTTP_POST, [](){ noteWebActivity(); clearLogs(); server.send(200, "text/plain", "Logs cleared."); });
   server.onNotFound([](){ server.send(404, "text/plain", "Not found."); });
   server.begin();
 }
@@ -478,8 +534,9 @@ void sampleSensors() {
 void setup() {
   Serial.begin(115200);
   delay(1200);
+  initStatusLeds();
 
-  Serial.println("\nMUSHROOM ENV LOGGER v0.1");
+  Serial.println("\nMUSHROOM ENV LOGGER v0.2");
 
   prefs.begin("mushlog", false);
   sessionId = prefs.getULong("session", 0) + 1;
@@ -515,6 +572,7 @@ void setup() {
 void loop() {
   server.handleClient();
   maintainWifi();
+  updateStatusLeds();
 
   uint32_t nowMs = millis();
 
