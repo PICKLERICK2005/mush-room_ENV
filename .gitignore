@@ -4,3 +4,4 @@ include/secrets.h
 *.csv
 .DS_Store
 Thumbs.db
+secrets.h
