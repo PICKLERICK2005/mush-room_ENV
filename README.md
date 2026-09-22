@@ -125,3 +125,15 @@ checks. Transitive library dependencies may still resolve to newer versions.
 Dependabot checks GitHub Actions updates monthly; it does not update PlatformIO dependencies.
 
 No project license has been selected yet.
+
+
+## v0.2.1
+
+Status LED polish:
+
+- the blue LED gives a short 120 ms heartbeat after each successful 5-second ENV III read
+- sustained sensor/filesystem trouble switches the blue LED to a rapid fault blink
+- the RGB LED is amber during startup while waiting for the first valid sample
+- a 15-second startup grace period prevents the previous false red flash during initialization
+- RGB green/cyan/amber/off behavior for dashboard activity, direct AP clients, upstream Wi-Fi, and standalone idle is unchanged
+- RGB red is reserved for a sustained fault

@@ -20,6 +20,8 @@ constexpr int RGB_DATA_PIN = 20;
 constexpr int RGB_POWER_PIN = 19;
 constexpr uint32_t WEB_ACTIVE_MS = 6000UL;
 constexpr uint32_t SENSOR_INTERVAL_MS = 5000UL;
+constexpr uint32_t HEARTBEAT_PULSE_MS = 120UL;
+constexpr uint32_t BOOT_GRACE_MS = 15000UL;
 constexpr uint32_t LOG_INTERVAL_MS = 300000UL;
 constexpr uint32_t WIFI_RETRY_MS = 30000UL;
 constexpr size_t LOG_CHUNK_TARGET_BYTES = 64 * 1024;
@@ -72,6 +74,9 @@ uint32_t sessionId = 0;
 uint32_t recordSeq = 0;
 uint32_t lastSensorMs = 0, lastLogMs = 0, lastWifiRetryMs = 0, lastValidSampleMs = 0;
 uint32_t lastWebActivityMs = 0;
+uint32_t lastHeartbeatMs = 0;
+uint32_t bootStartedMs = 0;
+bool firstGoodSampleSeen = false;
 bool firstRecordPending = true, filesystemOk = false, ntpConfigured = false, mdnsStarted = false;
 
 uint32_t currentChunkId = 0, oldestChunkId = 0;
@@ -85,7 +90,11 @@ void initStatusLeds() {
   pinMode(RGB_POWER_PIN, OUTPUT);
   digitalWrite(RGB_POWER_PIN, HIGH);
   delay(2);
-  rgbLedWrite(RGB_DATA_PIN, 0, 0, 0);
+
+  bootStartedMs = millis();
+
+  // Amber while the logger is starting and waiting for its first good sample.
+  rgbLedWrite(RGB_DATA_PIN, 24, 8, 0);
 }
 
 void noteWebActivity() {
@@ -94,24 +103,37 @@ void noteWebActivity() {
 
 void updateStatusLeds() {
   const uint32_t nowMs = millis();
-  const bool sensorHealthy = latest.valid && (nowMs - lastValidSampleMs < SENSOR_INTERVAL_MS * 3UL);
+  const bool sensorHealthy =
+      latest.valid && (nowMs - lastValidSampleMs < SENSOR_INTERVAL_MS * 3UL);
   const bool healthy = filesystemOk && sensorHealthy;
+  const bool bootGrace =
+      !firstGoodSampleSeen && (nowMs - bootStartedMs < BOOT_GRACE_MS);
 
-  // Blue LED = logger health. Solid blue when healthy; fast blink if degraded.
-  if (healthy) {
-    digitalWrite(BLUE_LED_PIN, HIGH);
+  // Blue LED:
+  //   healthy -> short pulse after each successful 5 s sensor acquisition
+  //   degraded -> rapid blink
+  // During boot grace it stays off.
+  if (bootGrace) {
+    digitalWrite(BLUE_LED_PIN, LOW);
+  } else if (healthy) {
+    const bool heartbeatOn =
+        lastHeartbeatMs != 0 && (nowMs - lastHeartbeatMs < HEARTBEAT_PULSE_MS);
+    digitalWrite(BLUE_LED_PIN, heartbeatOn ? HIGH : LOW);
   } else {
     digitalWrite(BLUE_LED_PIN, ((nowMs / 250UL) & 1U) ? HIGH : LOW);
   }
 
   // RGB uses deliberately low values so the tiny unit is not obnoxiously bright.
-  // Priority: fault > active dashboard > direct AP client > house Wi-Fi > idle.
-  const bool webActive = lastWebActivityMs != 0 && (nowMs - lastWebActivityMs < WEB_ACTIVE_MS);
+  // Priority: boot > fault > active dashboard > direct AP client > house Wi-Fi > idle.
+  const bool webActive =
+      lastWebActivityMs != 0 && (nowMs - lastWebActivityMs < WEB_ACTIVE_MS);
   const uint8_t apClients = WiFi.softAPgetStationNum();
   const bool staConnected = WiFi.status() == WL_CONNECTED;
 
-  if (!healthy) {
-    rgbLedWrite(RGB_DATA_PIN, 28, 0, 0);          // red: sensor/filesystem fault
+  if (bootGrace) {
+    rgbLedWrite(RGB_DATA_PIN, 24, 8, 0);          // amber: boot / waiting for first good sample
+  } else if (!healthy) {
+    rgbLedWrite(RGB_DATA_PIN, 28, 0, 0);          // red: sustained sensor/filesystem fault
   } else if (webActive) {
     rgbLedWrite(RGB_DATA_PIN, 0, 28, 0);          // green: dashboard/API actively in use
   } else if (apClients > 0) {
@@ -399,7 +421,7 @@ button.danger{background:#a83434}code{word-break:break-all}</style></head>
 <div class="card small"><strong>Logger</strong><br>Session: <span id="session">--</span><br>Uptime: <span id="uptime">--</span><br>Clock: <span id="clock">--</span><br>Sample age: <span id="age">--</span></div>
 <div class="card small"><strong>Storage</strong><br>Logs: <span id="logbytes">--</span><br>Files: <span id="files">--</span><br>Filesystem: <span id="fs">--</span></div>
 <div class="card small"><strong>Network</strong><br>STA: <span id="sta">--</span><br>RSSI: <span id="rssi">--</span><br>AP clients: <span id="apclients">--</span><br>Direct AP: <code>MUSHROOM-ENV</code><br>AP IP: <code>192.168.4.1</code></div>
-<div class="card small"><strong>Status LEDs</strong><br>Blue: logger healthy<br>Green RGB: dashboard active<br>Cyan RGB: AP client connected<br>Amber RGB: house Wi-Fi connected<br>Red RGB: fault</div>
+<div class="card small"><strong>Status LEDs</strong><br>Blue pulse: successful 5 s sensor read<br>Blue rapid blink: degraded/fault<br>Green RGB: dashboard active<br>Cyan RGB: AP client connected<br>Amber RGB: boot / house Wi-Fi<br>Red RGB: sustained fault</div>
 </section>
 <div class="actions"><a class="button" href="/download.csv">Download all CSV</a>
 <button id="sync">Sync clock from this device</button><button class="danger" id="clear">Clear logs</button></div>
@@ -525,6 +547,8 @@ void sampleSensors() {
   latest.pressureHpa = qmp6988.pressure / 100.0f;
   latest.dewPointC = dewPointC(latest.tempC, latest.rh);
   lastValidSampleMs = millis();
+  lastHeartbeatMs = lastValidSampleMs;  // heartbeat means a real sensor read succeeded
+  firstGoodSampleSeen = true;
   agg.add(latest);
 
   Serial.printf("LIVE T=%.2fC RH=%.2f%% P=%.2fhPa DP=%.2fC\n",
@@ -536,7 +560,7 @@ void setup() {
   delay(1200);
   initStatusLeds();
 
-  Serial.println("\nMUSHROOM ENV LOGGER v0.2");
+  Serial.println("\nMUSHROOM ENV LOGGER v0.2.1");
 
   prefs.begin("mushlog", false);
   sessionId = prefs.getULong("session", 0) + 1;
