@@ -1,11 +1,24 @@
+# Hardware smoke checks
 
-This directory is intended for PlatformIO Test Runner and project tests.
+There are no automated runtime tests yet. GitHub Actions checks that the root
+NanoC6 firmware compiles with include/secrets.example.h.
 
-Unit Testing is a software testing method by which individual units of
-source code, sets of one or more MCU program modules together with associated
-control data, usage procedures, and operating procedures, are tested to
-determine whether they are fit for use. Unit testing finds problems early
-in the development cycle.
+After building and uploading with PlatformIO:
 
-More information about PlatformIO Unit Testing:
-- https://docs.platformio.org/en/latest/advanced/unit-testing/index.html
+1. Connect ENV III to the NanoC6 Grove port. Open the serial monitor at 115200 baud
+   and verify sensor detection, LittleFS initialization, and live readings every 5 s.
+2. With upstream Wi-Fi credentials blank, connect to MUSHROOM-ENV and open
+   http://192.168.4.1/. Verify temperature, humidity, pressure, and dew point update.
+3. Verify the first sample is logged, then wait at least 5 minutes and download
+   CSV. Check the header, additional aggregate row, sample count, and min/max values.
+4. Use browser clock sync and verify new CSV rows contain UTC timestamps.
+5. Reboot. Verify previous records remain and new records use a new session ID.
+6. Disconnect the browser, leave the logger running for over 5 minutes, reconnect,
+   and confirm logging continued without a client.
+7. If using upstream Wi-Fi, verify LAN access and NTP synchronization with internet
+   access. Disconnect the router and confirm the direct AP still works.
+8. On a device containing only disposable test data, use Clear logs and verify
+   old records disappear and new records are subsequently written.
+
+Long-duration validation also needs to confirm that storage rotation deletes the
+oldest chunks while keeping newer data. Compilation alone does not establish this.

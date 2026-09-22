@@ -5,3 +5,8 @@ include/secrets.h
 .DS_Store
 Thumbs.db
 secrets.h
+.env
+.env.*
+!.env.example
+__pycache__/
+compile_commands.json
